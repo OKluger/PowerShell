@@ -1,4 +1,4 @@
-﻿function Get-WifiNetwork {
+function Get-WifiNetwork {
  end {
   netsh wlan sh net mode=bssid | % -process {
     if ($_ -match '^SSID (\d+) : (.*)$') {
@@ -13,6 +13,40 @@
     }
   } -begin { $networks = @() } -end { $networks|% { new-object psobject -property $_ } }
  }
+}
+
+function Get-WifiNetworkPS
+{
+    #[CmdletBinding()] Param ([Parameter(Mandatory=$true)][ValidateSet('Off', 'On')][string]$WifiStatus)
+    # https://www.reddit.com/r/sysadmin/comments/9az53e/need_help_controlling_wifi/
+    $WifiStatus = "On"
+    Add-Type -AssemblyName System.Runtime.WindowsRuntime
+    $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | ? {$_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'})[0]
+
+    Function Await($WinRtTask, $ResultType)
+    {
+        $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)
+        $netTask = $asTask.Invoke($null, @($WinRtTask))
+        $netTask.Wait(-1) | Out-Null
+        $netTask.Result
+    }
+
+    [Windows.Devices.Radios.Radio,Windows.System.Devices,ContentType=WindowsRuntime] | Out-Null
+    [Windows.Devices.Radios.RadioAccessStatus,Windows.System.Devices,ContentType=WindowsRuntime] | Out-Null
+    Await ([Windows.Devices.Radios.Radio]::RequestAccessAsync()) ([Windows.Devices.Radios.RadioAccessStatus]) | Out-Null
+    $radios = Await ([Windows.Devices.Radios.Radio]::GetRadiosAsync())([System.Collections.Generic.IReadOnlyList[Windows.Devices.Radios.Radio]])
+    $wifi = $radios | ? { $_.Kind -eq 'WiFi' }
+    [Windows.Devices.Radios.RadioState,Windows.System.Devices,ContentType=WindowsRuntime] | Out-Null
+
+    # necessary since Windows will automatically enable the status of a wifi device when the wired connection is lost
+    # Start-Sleep -Seconds 10
+    # Await ($wifi.SetStateAsync($WifiStatus)) ([Windows.Devices.Radios.RadioAccessStatus])
+    if ($wifi.State -eq "On") {
+      [Windows.Devices.WiFi.WiFiAdapter,Windows.System.Devices,Contenttype=WindowsRuntime] | Out-Null
+      $Res=Await ([Windows.Devices.WiFi.WiFiAdapter]::FindAllAdaptersAsync())([System.Collections.Generic.IReadOnlyList[Windows.Devices.WiFi.WiFiAdapter]])
+      $wifi = $res.NetworkReport.AvailableNetworks | Select-Object -ExpandProperty SecuritySettings -Property ssid, NetworkRssiInDecibelMilliwatts | Sort-Object -Property SSID -Unique
+      $wifi | Sort-Object NetworkRssiInDecibelMilliwatts -Descending
+    }
 }
 
 function ConnectToSSID
@@ -63,13 +97,16 @@ if (Test-Connection 1.1.1.1 -Count 1 -ErrorAction SilentlyContinue)
 {
     exit
 }
+else
+{
+    [Microsoft.VisualBasic.Interaction]::MsgBox('Internet connection mandatory! Starting WiFi Prompt',('OKCancel,SystemModal,Critical'),'Warning')
+}
 
 $WiFiNetworks = Get-WifiNetwork | Select-Object authentication, ssid, signal, 'radio type' | sort signal -desc
+###############$WiFiNetworks = Get-WifiNetworkPS | Select-Object Ssid, NetworkRssiInDecibelMilliwatts, NetworkAuthenticationType, NetworkEncryptionType
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-type -AssemblyName Microsoft.VisualBasic
-
-[Microsoft.VisualBasic.Interaction]::MsgBox('Internet connection mandatory! Starting WiFi Prompt',('OKCancel,SystemModal,Critical'),'Warning')
 
 $SelectionForm = New-Object System.Windows.Forms.Form
 $SelectionForm.Text = "Prepare New MSPD"
@@ -99,6 +136,7 @@ $Connect.Text = "CONNECT!"
 #Fill WiFi Networks
 $WiFiGrid.Rows.Clear()
 $WiFiNetworks | Where-Object -property Authentication -EQ "WPA2-Personal" | foreach{$WifiGrid.Rows.Add($_.signal,$_.ssid,$_.authentication,$_.'radio type')}
+###############$WiFiNetworks | Where-Object -property NetworkAuthenticationType -EQ "RsnaPsk" | foreach{$WifiGrid.Rows.Add($_.NetworkRssiInDecibelMilliwatts,$_.ssid,$_.NetworkAuthenticationType)}
 $WifiGrid.update()
 $WifiGrid.Refresh()
 
